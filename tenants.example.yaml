@@ -1,0 +1,196 @@
+# tenants.example.yaml — Multi-tenant configuration example.
+# Copy to tenants.yaml and fill in real values.
+# All ${VAR} references are expanded from the process environment at load time.
+# ${VAR:-default} syntax supported for fallback values.
+
+# ── Global defaults ────────────────────────────────────────────────────────────
+defaults:
+  vad:
+    silence_threshold_ms: 200    # stop_secs en ms para Silero VAD
+    speech_threshold_ms: 150     # start_secs en ms para Silero VAD
+  interruption:
+    strategy: min_words
+    min_words: 3
+  audio_profile: telephony_hybrid
+  stasis_app: vmo-pipecat-app
+
+# ── Asterisk nodes ─────────────────────────────────────────────────────────────
+asterisk_nodes:
+  - id: ast-1
+    host: ${AST1_HOST:-vmo_asterisk_1}
+    ari_port: 8088
+    ari_username: ${AST1_ARI_USERNAME:-vmo}
+    ari_password: ${AST1_ARI_PASSWORD}
+    ari_app: vmo-pipecat-app
+
+# ── AudioSocket listener ───────────────────────────────────────────────────────
+audiosocket:
+  bind_host: ${VMO_AUDIOSOCKET_HOST:-0.0.0.0}
+  port: ${VMO_AUDIOSOCKET_PORT:-8090}
+  advertise_host: ${VMO_AUDIOSOCKET_ADVERTISE_HOST:-vmo_pipecat}
+
+# ── Audio profiles ─────────────────────────────────────────────────────────────
+# telephony_hybrid: input 8kHz (c/slin), output 16kHz (pcm_16000).
+# El output transport resamplea 16kHz→8kHz antes de enviar a AudioSocket.
+audio_profiles:
+  telephony_hybrid:
+    in_rate: 8000
+    out_rate: 16000
+    codec: slin
+    channels: 1
+
+# ── Providers ──────────────────────────────────────────────────────────────────
+# Cada entry = un par (servicio, credencial). N entries del mismo kind = valido.
+providers:
+  # -- STT: Deepgram --
+  dg_stt:
+    kind: deepgram
+    mode: stt
+    api_key: ${DEEPGRAM_API_KEY}
+    params:
+      model: nova-3
+      language: es
+      # endpointing: 600  # ms de silencio para detectar fin de habla
+
+  # -- STT: ElevenLabs --
+  el_stt:
+    kind: elevenlabs_stt
+    mode: stt
+    api_key: ${ELEVENLABS_API_KEY}
+    params: {}
+
+  # -- LLM: OpenAI --
+  openai_llm:
+    kind: openai
+    mode: llm
+    api_key: ${OPENAI_API_KEY}
+    params:
+      model: gpt-4o-mini
+      temperature: 0.7
+      # max_tokens: 500  # opcional: limita tokens de respuesta
+
+  # -- TTS: ElevenLabs (HTTP, secuencial) --
+  el_tts:
+    kind: elevenlabs
+    mode: tts
+    api_key: ${ELEVENLABS_API_KEY}
+    params:
+      voice_id: ${EL_VOICE_ID}
+      model_id: eleven_multilingual_v2
+      speed: 1.0                 # 0.7-1.2, velocidad del habla
+      stability: 0.5             # 0.0-1.0, consistencia de voz
+      similarity_boost: 0.75     # 0.0-1.0, parecido a la voz original
+      optimize_streaming_latency: 3  # 0-4, menor=mejor calidad, mayor=menor latencia
+
+  # -- TTS: Deepgram (voz Celeste, español) --
+  dg_tts:
+    kind: deepgram
+    mode: tts
+    api_key: ${DEEPGRAM_API_KEY}
+    params:
+      model: aura-2-celeste-es
+
+  # -- Full-agent: Deepgram Voice Agent --
+  dg_fullagent:
+    kind: deepgram_voice_agent
+    mode: full_agent
+    api_key: ${DEEPGRAM_API_KEY}
+    params:
+      model: nova-3
+      tts_model: aura-2-celeste-es
+      language: es
+      think_provider: open_ai
+      think_model: gpt-4o-mini
+
+# ── Pipelines ──────────────────────────────────────────────────────────────────
+pipelines:
+  # Modular: Deepgram STT + OpenAI LLM + ElevenLabs TTS
+  pipe_modular:
+    kind: modular
+    stt: dg_stt
+    llm: openai_llm
+    tts: el_tts
+    vad: silero
+    # vad_params:           # opcional, pisa defaults.vad
+    #   stop_secs: 0.2
+    #   start_secs: 0.15
+
+  # Modular: Deepgram STT + OpenAI LLM + Deepgram TTS
+  pipe_modular_dg_tts:
+    kind: modular
+    stt: dg_stt
+    llm: openai_llm
+    tts: dg_tts
+    vad: silero
+
+  # Modular: ElevenLabs STT + OpenAI LLM + ElevenLabs TTS
+  pipe_modular_el:
+    kind: modular
+    stt: el_stt
+    llm: openai_llm
+    tts: el_tts
+    vad: silero
+
+  # Full-agent: Deepgram Voice Agent (STT+LLM+TTS+VAD en una sola WebSocket)
+  pipe_dg_fullagent:
+    kind: full_agent
+    provider: dg_fullagent
+
+# ── Contexts ───────────────────────────────────────────────────────────────────
+contexts:
+  context-test1:
+    prompt: "Eres una asistente virtual amable. Habla con el cliente sobre el tema de su interes. Responde siempre en espanol de forma concisa."
+    greeting: "Hola, en que puedo ayudarte hoy?"
+    audio_profile: telephony_hybrid
+    tools: []
+
+  context-test2:
+    prompt: "Eres una asistente virtual amable. Habla con el cliente sobre el tema de su interes. Responde siempre en espanol de forma concisa."
+    greeting: "Hola, en que puedo ayudarte hoy?"
+    audio_profile: telephony_hybrid
+    tools: []
+
+# ── Tenants ────────────────────────────────────────────────────────────────────
+tenants:
+  test1:
+    name: "Tenant Test"
+    transfer:
+      enabled: false
+      context: from-vmo-transfer
+      default_target: "9000"
+    routes:
+      "5000":
+        pipeline: pipe_modular
+        context: context-test1
+      "5100":
+        pipeline: pipe_modular_dg_tts
+        context: context-test1
+      "5200":
+        pipeline: pipe_modular_el
+        context: context-test1
+      "5300":
+        pipeline: pipe_dg_fullagent
+        context: context-test1
+      default:
+        pipeline: pipe_modular
+        context: context-test1
+
+  test2:
+    name: "Tenant Test2"
+    transfer:
+      enabled: false
+      context: from-vmo-transfer
+      default_target: "9000"
+    routes:
+      "6000":
+        pipeline: pipe_modular
+        context: context-test2
+      default:
+        pipeline: pipe_modular
+        context: context-test2
+
+# ── Fallback policy ────────────────────────────────────────────────────────────
+fallback:
+  policy: use_tenant     # reject | use_tenant
+  tenant: test1
+  reject_message: "Su llamada no puede ser atendida en este momento."

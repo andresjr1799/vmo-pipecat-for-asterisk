@@ -1,0 +1,126 @@
+name: vmo-pipecat-for-asterisk
+
+services:
+  #Visualizador de Trazas
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    restart: unless-stopped
+    ports:
+      - "16686:16686" # UI Web para ver las gráficas (http://localhost:16686)
+      # No exponemos el 4317 al host porque el OTel Collector ya lo usa, 
+      # Jaeger lo escuchará solo en la red interna de Docker.
+    networks: [vmo_net]
+
+  #Agente Colector
+  otel_collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: otel_collector
+    restart: unless-stopped
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317/tcp"   # OTLP gRPC (VMO envía aquí)
+      - "4318:4318/tcp"   # OTLP HTTP
+    networks: [vmo_net]
+    depends_on:
+      - jaeger
+
+  # 3. El Agente de Logs
+  fluent_bit:
+    image: fluent/fluent-bit:3.2
+    container_name: fluent_bit
+    restart: unless-stopped
+    command: ["-c", "/fluent-bit/etc/fluent-bit.conf"]
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+    ports:
+      - "24224:24224"     # Puerto para recibir logs del Docker Driver
+      - "24224:24224/udp"
+    depends_on:
+      otel_collector:
+        condition: service_started
+    networks: [vmo_net]
+
+  # 4. El Core de Python
+  vmo_pipecat:
+    image: vmo/pipecat-for-asterisk:${VMO_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vmo_pipecat
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      VMO_CONFIG_PATH: /etc/vmo/tenants.yaml
+      VMO_LOG_LEVEL: ${VMO_LOG_LEVEL:-INFO}
+      VMO_HTTP_HOST: 0.0.0.0
+      VMO_HTTP_PORT: "15000"
+      VMO_AUDIOSOCKET_HOST: 0.0.0.0
+      VMO_AUDIOSOCKET_PORT: "8090"
+      VMO_AUDIOSOCKET_ADVERTISE_HOST: vmo_pipecat
+      VMO_EVENT_BUS: ${VMO_EVENT_BUS:-logging}
+      VMO_ADMIN_TOKEN: ${VMO_ADMIN_TOKEN}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel_collector:4317
+      OTEL_SERVICE_NAME: vmo-pipecat
+      PYTHONPATH: /app
+    volumes:
+      - ./tenants.yaml:/etc/vmo/tenants.yaml:ro
+      - ./vmo_pipecat:/app/vmo_pipecat:ro
+    ports:
+      - "8090:8090/tcp"
+      - "15000:15000/tcp"
+    networks: [vmo_net]
+    depends_on:
+      fluent_bit:
+        condition: service_started
+    # Configuración de Logging para enviar stdout a Fluent Bit
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: "localhost:24224"
+        tag: "vmo.pipecat"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:15000/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+  # Asterisk node-1
+  vmo_asterisk_1:
+    build:
+      context: ./asterisk
+      dockerfile: Dockerfile
+    container_name: vmo_asterisk_1
+    restart: unless-stopped
+    environment:
+      ASTERISK_PORT: "5060"
+      HOST_IP_NIC: ${HOST_IP_NIC}
+      LOCAL_NET: ${LOCAL_NET}
+      PASS_EXTENSIONS_TEST: ${PASS_EXTENSIONS_TEST}
+      ARI_USERNAME: ${AST1_ARI_USERNAME}
+      ARI_PASSWORD: ${AST1_ARI_PASSWORD}
+      ASTERISK_ID: ast-1
+      RTP_START: ${RTP_START}
+      RTP_END: ${RTP_END}
+    volumes:
+      - ./asterisk/etc:/etc/asterisk
+      - asterisk_lib_1:/var/lib/asterisk
+    ports:
+      - "5060:5060/udp"
+      - "5060:5060/tcp"
+      - "8088:8088/tcp"
+      - "10000-10020:10000-10020/udp"
+    networks: [vmo_net]
+    depends_on:
+      vmo_pipecat:
+        condition: service_healthy
+
+volumes:
+  asterisk_lib_1:
+
+networks:
+  vmo_net:
+    driver: bridge

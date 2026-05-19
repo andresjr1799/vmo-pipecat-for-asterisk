@@ -1,0 +1,26 @@
+[general]
+static = yes
+writeprotect = no
+
+[from-sbc]
+exten => _XXX.,1,NoOp(Inicio de llamada DID: ${EXTEN} CALLER: ${CALLERID(num)})
+ same => n,Set(caller_id=${CALLERID(num)})
+ same => n,Set(tenant_id=${PJSIP_HEADER(read,X-TENANT-ID)})
+ same => n,Set(tenant_id=test1)
+ same => n,Set(tenant_name=Tenant Test)
+ same => n,Set(call_id_sbc=${CHANNEL(uniqueid)})
+ same => n,Set(did=${EXTEN})
+ same => n,Set(node_id=${ASTERISK_ID})
+ same => n,Stasis(vmo-pipecat-app)
+ same => n,Hangup()
+
+[extensiones-test]
+include => from-sbc
+exten => _9XXX,1,NoOp(Inicio Test Interno)
+ same => n,Dial(PJSIP/${EXTEN},30)
+ same => n,Hangup()
+
+[from-vmo-transfer]
+exten => _X.,1,NoOp(VMO transfer)
+ same => n,Dial(PJSIP/${EXTEN}@sbc-trunk,30)
+ same => n,Hangup()
